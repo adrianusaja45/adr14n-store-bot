@@ -77,7 +77,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply({ content: 'Panel Done!', ephemeral: true });
         }
 
-        // --- 2. OPEN MODAL (Dengan Cek Channel Hilang) ---
+        // --- 2. OPEN MODAL ---
         if (interaction.isButton() && interaction.customId === 'open_ticket') {
             const check = await pool.query("SELECT * FROM transactions WHERE buyer_id = $1 AND status != 'completed' AND status != 'cancelled'", [interaction.user.id]);
             
@@ -137,7 +137,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply({ embeds: [embed], ephemeral: true });
         }
 
-        // --- 5. UPLOAD BUKTI (VERSI RAPI) ---
+        // --- 5. UPLOAD BUKTI ---
         if (interaction.isButton() && interaction.customId === 'btn_confirm_paid') {
             const tData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
             if (tData.rows.length === 0 || tData.rows[0].buyer_id !== interaction.user.id) return interaction.reply({content: '❌ Error / Bukan pembeli.', ephemeral: true});
@@ -152,15 +152,13 @@ client.on('interactionCreate', async interaction => {
                 
                 await pool.query("UPDATE transactions SET proof_image = $1, status = 'pending_check' WHERE channel_id = $2", [imgUrl, ticketChId]);
 
-                // A. KASIH TAU BUYER (TANPA TOMBOL)
                 const waitEmbed = new EmbedBuilder().setTitle('✅ Bukti Diterima').setDescription('Mohon tunggu, Admin sedang memverifikasi pembayaran Anda.').setColor('Blue');
                 await interaction.channel.send({ embeds: [waitEmbed] });
 
-                // B. KIRIM TOMBOL KE LOG ADMIN (AGAR RAPI)
+                // Kirim ke Log Admin
                 const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
                 if (logChannel) {
                     const adminEmbed = new EmbedBuilder().setTitle(`⚠️ Verifikasi #${tData.rows[0].ticket_id}`).setDescription(`Buyer: <@${m.author.id}>\nChannel: <#${ticketChId}>`).setImage(imgUrl).setColor('Orange');
-                    // Simpan Channel ID di dalam Custom ID Tombol
                     const adminRow = new ActionRowBuilder().addComponents(
                         new ButtonBuilder().setCustomId(`admin_acc_${ticketChId}`).setLabel('✅ Terima').setStyle(ButtonStyle.Success),
                         new ButtonBuilder().setCustomId(`admin_reject_${ticketChId}`).setLabel('❌ Tolak').setStyle(ButtonStyle.Danger)
@@ -170,84 +168,96 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        // --- 6. ADMIN TERIMA (DARI CHANNEL LOG) ---
+        // --- 6. ADMIN TERIMA (DI LOG) ---
         if (interaction.isButton() && interaction.customId.startsWith('admin_acc_')) {
-            // Ambil Channel ID Tiket dari tombol
             const targetChannelId = interaction.customId.split('_')[2];
-            
-            // Update DB
             const res = await pool.query("UPDATE transactions SET status = 'paid' WHERE channel_id = $1 RETURNING *", [targetChannelId]);
-            if (res.rows.length === 0) return interaction.reply({content: '❌ Data tiket tidak ditemukan (mungkin sudah dihapus).', ephemeral: true});
+            if (res.rows.length === 0) return interaction.reply({content: '❌ Error.', ephemeral: true});
             const data = res.rows[0];
 
-            // Update Pesan di Log (Hilangkan tombol)
             await interaction.message.edit({ components: [] }); 
 
-            // Kirim Notif ke Channel Ticket Buyer
             const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
             if (ticketChannel) {
-                const finishRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('admin_finish').setLabel('🏁 Selesai & Tutup').setStyle(ButtonStyle.Primary));
+                // UPDATE: Tombol ini untuk Admin, memberi tahu bahwa barang sudah dikirim
+                const adminSentRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('admin_sent_product').setLabel('📦 Barang Sudah Dikirim').setStyle(ButtonStyle.Primary)
+                );
+                
                 await ticketChannel.send({ 
-                    content: `✅ **Pembayaran Diterima!**\nTerima kasih <@${data.buyer_id}>. Pesanan sedang diproses.`,
+                    content: `✅ **Pembayaran Diterima!**\nTerima kasih <@${data.buyer_id}>. Admin akan segera mengirim produk Anda.\n\n*(Admin: Klik tombol di bawah jika produk sudah dikirim)*`,
                     embeds: [new EmbedBuilder().setTitle('Status: PAID').setColor('Green')],
-                    components: [finishRow]
+                    components: [adminSentRow]
                 });
             }
-
             await interaction.reply({ content: `✅ Sukses verifikasi tiket #${data.ticket_id}`, ephemeral: true });
         }
 
-        // --- 7. ADMIN TOLAK (DARI CHANNEL LOG) ---
-        if (interaction.isButton() && interaction.customId.startsWith('admin_reject_')) {
-            const targetChannelId = interaction.customId.split('_')[2];
-            const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
-            
-            await interaction.message.delete(); // Hapus pesan di log
-            
-            if (ticketChannel) {
-                await ticketChannel.send(`❌ **Pembayaran Ditolak.**\nAdmin menolak bukti transfer. Silakan kirim ulang yang valid.`);
+        // --- 7. ADMIN BARANG DIKIRIM & MINTA CONFIRM BUYER ---
+        if (interaction.isButton() && interaction.customId === 'admin_sent_product') {
+            if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({content: '❌ Admin only', ephemeral: true});
+
+            // Kirim tombol konfirmasi KHUSUS BUYER
+            const buyerConfirmRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('buyer_confirm_receive').setLabel('✅ Pesanan Diterima & Selesai').setStyle(ButtonStyle.Success)
+            );
+
+            await interaction.reply({ 
+                content: `📦 **Produk Telah Dikirim!**\n\nSilakan cek pesanan Anda. Jika sudah sesuai, klik tombol di bawah untuk menyelesaikan transaksi dan memberikan testimoni.`,
+                components: [buyerConfirmRow] 
+            });
+        }
+
+        // --- 8. BUYER KONFIRMASI TERIMA (TRIGGER TESTIMONI) ---
+        if (interaction.isButton() && interaction.customId === 'buyer_confirm_receive') {
+            // Cek apakah yang klik benar-benar Buyer
+            const tData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
+            if (tData.rows.length === 0 || tData.rows[0].buyer_id !== interaction.user.id) {
+                return interaction.reply({ content: '❌ Hanya Pembeli yang bisa mengkonfirmasi ini!', ephemeral: true });
             }
-            await interaction.reply({ content: '❌ Verifikasi ditolak.', ephemeral: true });
-        }
 
-        // --- 8. SELESAI & TESTIMONI ---
-        if (interaction.isButton() && interaction.customId === 'admin_finish') {
-            // Logic sama seperti sebelumnya
-            const res = await pool.query("UPDATE transactions SET status = 'completed' WHERE channel_id = $1 RETURNING *", [interaction.channel.id]);
-            const data = res.rows[0];
-            const buyer = await client.users.fetch(data.buyer_id);
-            const testiRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`testi_${data.buyer_id}`).setLabel('⭐ Beri Testimoni').setStyle(ButtonStyle.Success));
-
-            try { await buyer.send({ content: `Halo! Transaksi #${data.ticket_id} selesai. Mohon beri ulasan!`, components: [testiRow] }); } 
-            catch (e) { await interaction.channel.send({ content: `<@${data.buyer_id}> Transaksi selesai! Review disini:`, components: [testiRow] }); }
-
-            const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
-            if (logChannel) logChannel.send(`✅ Ticket #${data.ticket_id} COMPLETED.`);
-            
-            await interaction.reply('Channel dihapus dalam 10 detik.');
-            setTimeout(() => interaction.channel.delete().catch(() => {}), 10000);
-            updateStatus();
-        }
-
-        // --- 9. SUBMIT TESTIMONI ---
-        if (interaction.isButton() && interaction.customId.startsWith('testi_')) {
-            if (interaction.user.id !== interaction.customId.split('_')[1]) return interaction.reply({content: 'Bukan untukmu', ephemeral: true});
-            const modal = new ModalBuilder().setCustomId('modal_testi').setTitle('Tulis Testimoni');
-            modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('rating').setLabel('Rating (1-5)').setStyle(TextInputStyle.Short).setMaxLength(1).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('msg').setLabel('Pesan').setStyle(TextInputStyle.Paragraph).setRequired(true)));
+            // Langsung buka Form Testimoni
+            const modal = new ModalBuilder().setCustomId('modal_testi').setTitle('Bagaimana Pelayanan Kami?');
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('rating').setLabel('Rating (1-5)').setStyle(TextInputStyle.Short).setMaxLength(1).setRequired(true)),
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('msg').setLabel('Tulis ulasan singkat...').setStyle(TextInputStyle.Paragraph).setRequired(true))
+            );
             await interaction.showModal(modal);
         }
 
+        // --- 9. SUBMIT TESTIMONI & DELETE CHANNEL ---
         if (interaction.isModalSubmit() && interaction.customId === 'modal_testi') {
             let rating = parseInt(interaction.fields.getTextInputValue('rating')) || 5;
             if (rating < 1) rating = 1; if (rating > 5) rating = 5;
             const msg = interaction.fields.getTextInputValue('msg');
             
+            // Simpan Testimoni
             await pool.query("INSERT INTO testimonials (user_id, username, message, rating) VALUES ($1, $2, $3, $4)", [interaction.user.id, interaction.user.username, msg, rating]);
+            
+            // Post ke Channel Testimoni
             const testiChannel = client.channels.cache.get(process.env.TESTIMONI_CHANNEL_ID);
             if (testiChannel) await testiChannel.send({ embeds: [new EmbedBuilder().setAuthor({ name: interaction.user.tag, iconURL: interaction.user.displayAvatarURL() }).setDescription(`**Rating:** ${'⭐'.repeat(rating)}\n"${msg}"`).setColor('Gold').setTimestamp()] });
             
-            await interaction.reply({ content: 'Testimoni terkirim!', ephemeral: true });
+            // Update Status Completed
+            await pool.query("UPDATE transactions SET status = 'completed' WHERE channel_id = $1", [interaction.channel.id]);
+
+            // Log Completed
+            const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
+            if (logChannel) logChannel.send(`✅ Ticket (Completed) - ${interaction.user.tag}`);
+
+            // Hapus Channel
+            await interaction.reply({ content: '✅ Terima kasih! Transaksi selesai. Channel akan dihapus dalam 5 detik...' });
+            setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
             updateStatus();
+        }
+
+        // --- 10. ADMIN TOLAK (LOG) ---
+        if (interaction.isButton() && interaction.customId.startsWith('admin_reject_')) {
+            const targetChannelId = interaction.customId.split('_')[2];
+            const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
+            await interaction.message.delete(); 
+            if (ticketChannel) await ticketChannel.send(`❌ **Pembayaran Ditolak.**\nBukti tidak valid. Silakan kirim ulang.`);
+            await interaction.reply({ content: '❌ Ditolak.', ephemeral: true });
         }
 
     } catch (e) { console.error(e); if(!interaction.replied) interaction.reply({ content: 'Error sistem.', ephemeral: true }); }
