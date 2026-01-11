@@ -27,7 +27,7 @@ const client = new Client({
     intents:  [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
 });
 
-// ========== DATA PEMBAYARAN LENGKAP ==========
+// ========== DATA PEMBAYARAN ==========
 const paymentMethods = [
     { name: 'Bank Jago', emoji: '🟣', number: '104004201095', holder: 'Adrianus Indraprasta Dwicaksana' },
     { name: 'BCA', emoji: '🔵', number: '2802312092', holder: 'Adrianus Indraprasta Dwicaksana' },
@@ -67,7 +67,7 @@ client.once('ready', async () => {
 // ========== INTERACTION HANDLER ==========
 client.on('interactionCreate', async interaction => {
     try {
-        // --- 1. SETUP COMMAND (TAMPILAN BARU SESUAI GAMBAR) ---
+        // --- 1. SETUP COMMAND ---
         if (interaction.isChatInputCommand() && interaction.commandName === 'setup-ticket') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({content: '❌ Admin only', ephemeral: true});
             
@@ -85,23 +85,17 @@ client.on('interactionCreate', async interaction => {
                     '• Garansi Produk\n\n' +
                     '👇 **Klik tombol di bawah untuk membuat ticket!**'
                 )
-                .setColor('#5865F2') // Warna Blurple Discord (sesuai gambar)
+                .setColor('#5865F2')
                 .setFooter({ text: 'ADR14N Store • Trusted Seller' })
                 .setTimestamp();
             
-            // Menggunakan Icon Server sebagai Thumbnail (Pojok Kanan Atas)
             if (interaction.guild.iconURL()) {
                 embed.setThumbnail(interaction.guild.iconURL({ dynamic: true }));
             }
-
-            // (Opsional) Banner Bawah jika ada di env
             if (process.env.BANNER_URL) embed.setImage(process.env.BANNER_URL);
 
             const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('open_ticket')
-                    .setLabel('📩 Buat Ticket') // Label disesuaikan
-                    .setStyle(ButtonStyle.Primary)
+                new ButtonBuilder().setCustomId('open_ticket').setLabel('📩 Buat Ticket').setStyle(ButtonStyle.Primary)
             );
 
             await interaction.channel.send({ embeds: [embed], components: [row] });
@@ -122,7 +116,8 @@ client.on('interactionCreate', async interaction => {
             const modal = new ModalBuilder().setCustomId('ticket_modal').setTitle('Form Pemesanan');
             modal.addComponents(
                 new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('produk').setLabel('Produk').setStyle(TextInputStyle.Short).setRequired(true)),
-                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('harga').setLabel('Budget (Angka)').setStyle(TextInputStyle.Short).setRequired(true)),
+                // UPDATE DISINI: Mengubah Label "Budget (Angka)" menjadi "Harga"
+                new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('harga').setLabel('Harga').setStyle(TextInputStyle.Short).setRequired(true)),
                 new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('detail').setLabel('Detail').setStyle(TextInputStyle.Paragraph).setRequired(false))
             );
             await interaction.showModal(modal);
@@ -159,7 +154,7 @@ client.on('interactionCreate', async interaction => {
             updateStatus();
         }
 
-        // --- 4. INFO BAYAR (LENGKAP) ---
+        // --- 4. INFO BAYAR ---
         if (interaction.isButton() && interaction.customId === 'btn_pay_info') {
             let desc = ''; paymentMethods.forEach(p => desc += `${p.emoji} **${p.name}**\n\`${p.number}\`\na.n ${p.holder}\n\n`);
             const embed = new EmbedBuilder().setTitle('Metode Pembayaran').setDescription(desc).setColor('Blue');
@@ -198,7 +193,7 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        // --- 6. ADMIN TERIMA (DI LOG) ---
+        // --- 6. ADMIN TERIMA ---
         if (interaction.isButton() && interaction.customId.startsWith('admin_acc_')) {
             const targetChannelId = interaction.customId.split('_')[2];
             const res = await pool.query("UPDATE transactions SET status = 'paid' WHERE channel_id = $1 RETURNING *", [targetChannelId]);
@@ -236,7 +231,7 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        // --- 8. BUYER KONFIRMASI TERIMA (MINTA GAMBAR) ---
+        // --- 8. BUYER KONFIRMASI TERIMA ---
         if (interaction.isButton() && interaction.customId === 'buyer_confirm_receive') {
             const tData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
             if (tData.rows.length === 0 || tData.rows[0].buyer_id !== interaction.user.id) {
@@ -305,7 +300,7 @@ client.on('interactionCreate', async interaction => {
             updateStatus();
         }
 
-        // --- 11. ADMIN TOLAK (LOG) ---
+        // --- 11. ADMIN TOLAK ---
         if (interaction.isButton() && interaction.customId.startsWith('admin_reject_')) {
             const targetChannelId = interaction.customId.split('_')[2];
             const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
