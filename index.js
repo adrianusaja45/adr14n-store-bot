@@ -12,13 +12,13 @@ const {
     TextInputStyle,
     AttachmentBuilder
 } = require('discord.js');
-const { Pool } = require('pg'); // Database PostgreSQL
+const { Pool } = require('pg'); 
 require('dotenv').config();
 
-// ========== KONFIGURASI DATABASE POSTGRESQL (Fitur 7) ==========
+// ========== KONFIGURASI DATABASE POSTGRESQL ==========
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false } // Diperlukan untuk Railway
+    ssl: { rejectUnauthorized: false } 
 });
 
 const client = new Client({
@@ -38,11 +38,10 @@ const paymentMethods = [
     { name:  'QRIS', emoji: '📱', number: 'ADR14NSTORE', holder: 'Scan QR Code' }
 ];
 
-// ========== SETUP TABLE DATABASE OTOMATIS ==========
+// ========== SETUP DATABASE ==========
 async function initDb() {
     const client = await pool.connect();
     try {
-        // Tabel Transaksi
         await client.query(`
             CREATE TABLE IF NOT EXISTS transactions (
                 ticket_id SERIAL PRIMARY KEY,
@@ -57,7 +56,6 @@ async function initDb() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
-        // Tabel Testimoni
         await client.query(`
             CREATE TABLE IF NOT EXISTS testimonials (
                 id SERIAL PRIMARY KEY,
@@ -76,7 +74,7 @@ async function initDb() {
     }
 }
 
-// ========== FUNGSI STATUS BOT (Fitur 8) ==========
+// ========== STATUS BOT ==========
 async function updateStatus() {
     try {
         const resTrans = await pool.query('SELECT COUNT(*) FROM transactions');
@@ -91,16 +89,13 @@ async function updateStatus() {
     } catch (e) { console.error(e); }
 }
 
-// ========== BOT READY ==========
+// ========== READY EVENT ==========
 client.once('ready', async () => {
     console.log(`✅ Bot ${client.user.tag} online!`);
     await initDb();
-    
-    // Update status setiap 5 menit
     updateStatus();
     setInterval(updateStatus, 300000); 
 
-    // Register Command Setup (Hanya dijalankan sekali atau saat perlu update command)
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
     if (guild) {
         await guild.commands.set([
@@ -112,27 +107,29 @@ client.once('ready', async () => {
 // ========== INTERACTION HANDLER ==========
 client.on('interactionCreate', async interaction => {
     try {
-        // --- BUTTON: SETUP TICKET ---
+        // --- COMMAND: SETUP TICKET ---
         if (interaction.isChatInputCommand() && interaction.commandName === 'setup-ticket') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({content: '❌ Admin only', ephemeral: true});
             
             const embed = new EmbedBuilder()
                 .setTitle('🛒 ADR14N STORE - ORDER DISINI')
                 .setDescription('Klik tombol di bawah untuk memulai transaksi.\nMetode pembayaran: BCA, Jago, QRIS, E-Wallet.')
-                .setColor('Blue')
-                .setImage(process.env.BANNER_URL || null); // Opsional banner
+                .setColor('Blue');
+
+            // Cek variable QRIS_IMAGE_URL atau QRIS_URL (kompatibilitas)
+            const bannerUrl = process.env.BANNER_URL;
+            if (bannerUrl) embed.setImage(bannerUrl);
 
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('open_ticket').setLabel('📩 Buat Pesanan').setStyle(ButtonStyle.Primary)
             );
             
             await interaction.channel.send({ embeds: [embed], components: [row] });
-            interaction.reply({ content: 'Done', ephemeral: true });
+            interaction.reply({ content: 'Panel Ticket Terpasang!', ephemeral: true });
         }
 
         // --- BUTTON: OPEN MODAL ---
         if (interaction.isButton() && interaction.customId === 'open_ticket') {
-            // Cek apakah user punya tiket aktif di DB
             const check = await pool.query("SELECT * FROM transactions WHERE buyer_id = $1 AND status != 'completed' AND status != 'cancelled'", [interaction.user.id]);
             if (check.rows.length > 0) return interaction.reply({ content: `❌ Anda masih punya tiket aktif! <#${check.rows[0].channel_id}>`, ephemeral: true });
 
@@ -153,28 +150,29 @@ client.on('interactionCreate', async interaction => {
             const harga = interaction.fields.getTextInputValue('harga').replace(/\D/g, '');
             const detail = interaction.fields.getTextInputValue('detail') || '-';
 
-            // Insert ke DB dulu untuk dapat ID
             const insert = await pool.query(
                 "INSERT INTO transactions (buyer_id, buyer_tag, product, amount, detail) VALUES ($1, $2, $3, $4, $5) RETURNING ticket_id",
                 [interaction.user.id, interaction.user.tag, produk, harga, detail]
             );
             const ticketId = insert.rows[0].ticket_id;
 
-            // Buat Channel
+            // --- BAGIAN INI YANG DIPERBAIKI (PERMISSION) ---
             const channel = await interaction.guild.channels.create({
                 name: `ticket-${ticketId}`,
                 type: ChannelType.GuildText,
                 permissionOverwrites: [
                     { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+                    // Izin untuk Buyer
                     { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles] },
-                    { id: process.env.ADMIN_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+                    // Izin untuk Role Admin
+                    { id: process.env.ADMIN_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+                    // ✅ Izin untuk BOT (Supaya tidak stuck thinking/locked out)
+                    { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.AttachFiles] }
                 ]
             });
 
-            // Update channel_id di DB
             await pool.query("UPDATE transactions SET channel_id = $1 WHERE ticket_id = $2", [channel.id, ticketId]);
 
-            // Embed Ticket Info
             const embed = new EmbedBuilder()
                 .setTitle(`Ticket #${ticketId}`)
                 .addFields(
@@ -185,7 +183,6 @@ client.on('interactionCreate', async interaction => {
                 )
                 .setColor('Yellow');
 
-            // Tombol Awal (Fitur 1: Tombol berbeda nanti muncul sesuai step)
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('btn_pay_info').setLabel('💳 Info Bayar').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId('btn_confirm_paid').setLabel('✅ Saya Sudah Bayar').setStyle(ButtonStyle.Success)
@@ -193,32 +190,34 @@ client.on('interactionCreate', async interaction => {
 
             await channel.send({ content: `<@${interaction.user.id}> | <@&${process.env.ADMIN_ROLE_ID}>`, embeds: [embed], components: [row] });
             await interaction.editReply({ content: `✅ Tiket dibuat: ${channel}` });
-            updateStatus(); // Update status bot (Fitur 8)
+            updateStatus();
         }
 
         // --- BUTTON: INFO BAYAR ---
         if (interaction.isButton() && interaction.customId === 'btn_pay_info') {
             let desc = '';
             paymentMethods.forEach(p => desc += `${p.emoji} **${p.name}**: \`${p.number}\` (${p.holder})\n`);
+            
             const embed = new EmbedBuilder().setTitle('Metode Pembayaran').setDescription(desc).setColor('Blue');
-            if(process.env.QRIS_URL) embed.setImage(process.env.QRIS_URL);
+            
+            // Menggunakan QRIS_IMAGE_URL sesuai screenshot Railway
+            const qrisUrl = process.env.QRIS_IMAGE_URL || process.env.QRIS_URL;
+            if(qrisUrl) embed.setImage(qrisUrl);
             
             interaction.reply({ embeds: [embed], ephemeral: true });
         }
 
-        // --- BUTTON: SUDAH BAYAR (Fitur 2: Minta Bukti SS) ---
+        // --- BUTTON: SUDAH BAYAR (Minta SS) ---
         if (interaction.isButton() && interaction.customId === 'btn_confirm_paid') {
-            // Cek owner tiket
             const ticketData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
             if (ticketData.rows.length === 0) return;
             if (ticketData.rows[0].buyer_id !== interaction.user.id) return interaction.reply({content: '❌ Anda bukan pembeli tiket ini', ephemeral: true});
 
             await interaction.reply({ 
-                content: '📸 **Silakan upload gambar/screenshot bukti transfer di chat ini sekarang.**\nBot menunggu lampiran gambar...', 
+                content: '📸 **Silakan upload gambar/screenshot bukti transfer di chat ini.**\nBot menunggu lampiran gambar (timeout 60 detik)...', 
                 fetchReply: true 
             });
 
-            // Collector Gambar
             const filter = m => m.author.id === interaction.user.id && m.attachments.size > 0;
             const collector = interaction.channel.createMessageCollector({ filter, max: 1, time: 60000 });
 
@@ -226,16 +225,14 @@ client.on('interactionCreate', async interaction => {
                 const attachment = m.attachments.first();
                 const imageUrl = attachment.url;
 
-                // Update DB dengan bukti
                 await pool.query("UPDATE transactions SET proof_image = $1, status = 'pending_check' WHERE channel_id = $2", [imageUrl, interaction.channel.id]);
 
                 const proofEmbed = new EmbedBuilder()
-                    .setTitle('⚠️ Verifikasi Pembayaran (Fitur 3)')
+                    .setTitle('⚠️ Verifikasi Pembayaran')
                     .setDescription(`Buyer <@${m.author.id}> telah mengirim bukti transfer.`)
                     .setImage(imageUrl)
                     .setColor('Orange');
 
-                // Fitur 3: Tombol Khusus Admin
                 const adminRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('admin_acc').setLabel('✅ Terima Pembayaran').setStyle(ButtonStyle.Success),
                     new ButtonBuilder().setCustomId('admin_reject').setLabel('❌ Tolak / Palsu').setStyle(ButtonStyle.Danger)
@@ -245,21 +242,20 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        // --- ADMIN: TERIMA PEMBAYARAN (Fitur 3 & 4) ---
+        // --- ADMIN: TERIMA BAYAR ---
         if (interaction.isButton() && interaction.customId === 'admin_acc') {
-            // Cek Admin Role (Fitur 1)
             if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({content: '❌ Khusus Admin', ephemeral: true});
 
             const res = await pool.query("UPDATE transactions SET status = 'paid' WHERE channel_id = $1 RETURNING *", [interaction.channel.id]);
             const data = res.rows[0];
 
-            await interaction.message.edit({ components: [] }); // Hapus tombol accept/reject
+            await interaction.message.edit({ components: [] }); // Disable buttons
             await interaction.channel.send({ 
-                content: `✅ **Pembayaran Diterima!**\nTerima kasih <@${data.buyer_id}>. Produk akan segera diproses oleh Admin.`,
+                content: `✅ **Pembayaran Diterima!**\nTerima kasih <@${data.buyer_id}>. Pesanan sedang diproses.`,
                 embeds: [new EmbedBuilder().setTitle('Status: PAID').setColor('Green')] 
             });
 
-            // Fitur 4: Log Transaksi Otomatis (Saat dibayar)
+            // LOG TRANSAKSI
             const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
             if (logChannel) {
                 logChannel.send({
@@ -268,64 +264,61 @@ client.on('interactionCreate', async interaction => {
                         .addFields(
                             { name: 'Ticket', value: `#${data.ticket_id}`, inline: true },
                             { name: 'Buyer', value: `<@${data.buyer_id}>`, inline: true },
-                            { name: 'Total', value: `${data.amount}`, inline: true }
+                            { name: 'Total', value: `Rp ${parseInt(data.amount).toLocaleString('id-ID')}`, inline: true }
                         )
                         .setThumbnail(data.proof_image)
                         .setColor('Green')
                         .setTimestamp()
                     ]
-                });
+                }).catch(err => console.log("Gagal kirim log:", err));
             }
 
-            // Tombol Selesai untuk Admin
             const finishRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('admin_finish').setLabel('🏁 Selesai & Tutup').setStyle(ButtonStyle.Primary)
             );
-            await interaction.channel.send({ content: 'Jika pesanan sudah dikirim, tekan tombol ini:', components: [finishRow] });
-            await interaction.reply({ content: 'Status diupdate ke PAID', ephemeral: true });
+            await interaction.channel.send({ content: 'Jika pesanan selesai dikirim, tekan tombol ini:', components: [finishRow] });
+            await interaction.reply({ content: 'Status PAID', ephemeral: true });
         }
 
-        // --- ADMIN: TOLAK PEMBAYARAN (Fitur 3) ---
+        // --- ADMIN: TOLAK BAYAR ---
         if (interaction.isButton() && interaction.customId === 'admin_reject') {
             if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({content: '❌ Khusus Admin', ephemeral: true});
-
-            await interaction.channel.send(`❌ **Pembayaran Ditolak.**\n<@${interaction.user.id}> (Admin) menolak bukti tersebut. Silakan kirim bukti yang valid lagi.`);
+            await interaction.channel.send(`❌ **Pembayaran Ditolak.**\n<@${interaction.user.id}> (Admin) menolak bukti tersebut. Silakan kirim ulang.`);
             await interaction.message.delete(); 
         }
 
-        // --- ADMIN: SELESAI & REQUEST TESTIMONI (Fitur 5 & 6) ---
+        // --- ADMIN: SELESAI & TESTIMONI ---
         if (interaction.isButton() && interaction.customId === 'admin_finish') {
             if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return;
 
             const res = await pool.query("UPDATE transactions SET status = 'completed' WHERE channel_id = $1 RETURNING *", [interaction.channel.id]);
             const data = res.rows[0];
 
-            // Kirim Button Testimoni ke Buyer sebelum channel dihapus
             const buyer = await client.users.fetch(data.buyer_id);
             const testiRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`testi_${data.buyer_id}`).setLabel('⭐ Beri Testimoni').setStyle(ButtonStyle.Success)
             );
 
-            // Coba kirim ke DM Buyer atau tag di channel
+            // Coba DM Buyer
             try {
                 await buyer.send({ 
-                    content: `Halo! Transaksi #${data.ticket_id} (${data.product}) telah selesai. Mohon beri ulasan ya!`, 
+                    content: `Halo! Transaksi #${data.ticket_id} (${data.product}) selesai. Mohon beri ulasan ya!`, 
                     components: [testiRow] 
                 });
             } catch (e) {
-                await interaction.channel.send({ content: `<@${data.buyer_id}> Transaksi selesai! Klik tombol ini untuk review sebelum channel ditutup.`, components: [testiRow] });
+                await interaction.channel.send({ content: `<@${data.buyer_id}> Transaksi selesai! Klik tombol ini untuk review.`, components: [testiRow] });
             }
 
-            // Log Selesai
+            // LOG SELESAI
             const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
-            if (logChannel) logChannel.send(`✅ Ticket #${data.ticket_id} SELESAI.`);
+            if (logChannel) logChannel.send(`✅ Ticket #${data.ticket_id} SELESAI (Completed).`).catch(() => {});
             
-            await interaction.reply('Transaksi selesai. Channel akan dihapus dalam 10 detik.');
+            await interaction.reply('Channel akan dihapus dalam 10 detik.');
             setTimeout(() => interaction.channel.delete().catch(() => {}), 10000);
             updateStatus();
         }
 
-        // --- FORM TESTIMONI (Fitur 5) ---
+        // --- FORM TESTIMONI ---
         if (interaction.isButton() && interaction.customId.startsWith('testi_')) {
             const buyerId = interaction.customId.split('_')[1];
             if (interaction.user.id !== buyerId) return interaction.reply({content: 'Bukan untukmu', ephemeral: true});
@@ -338,7 +331,7 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
 
-        // --- SUBMIT TESTIMONI & POST KE CHANNEL (Fitur 6) ---
+        // --- SUBMIT TESTIMONI ---
         if (interaction.isModalSubmit() && interaction.customId === 'modal_testi') {
             const ratingStr = interaction.fields.getTextInputValue('rating');
             let rating = parseInt(ratingStr);
@@ -347,10 +340,8 @@ client.on('interactionCreate', async interaction => {
             const msg = interaction.fields.getTextInputValue('msg');
             const stars = '⭐'.repeat(rating);
 
-            // Simpan ke DB
             await pool.query("INSERT INTO testimonials (user_id, username, message, rating) VALUES ($1, $2, $3, $4)", [interaction.user.id, interaction.user.username, msg, rating]);
 
-            // Post ke Channel Testimoni (Fitur 6)
             const testiChannel = client.channels.cache.get(process.env.TESTIMONI_CHANNEL_ID);
             if (testiChannel) {
                 const embed = new EmbedBuilder()
@@ -368,8 +359,8 @@ client.on('interactionCreate', async interaction => {
         }
 
     } catch (e) {
-        console.error(e);
-        if(!interaction.replied) interaction.reply({ content: 'Error sistem.', ephemeral: true });
+        console.error('Interaction Error:', e);
+        if(!interaction.replied) interaction.reply({ content: 'Terjadi kesalahan sistem.', ephemeral: true });
     }
 });
 
