@@ -20,6 +20,10 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false } 
 });
 
+// Cache Sementara untuk menyimpan URL gambar sebelum Modal disubmit
+// Key: UserId, Value: ImageURL
+const tempImageCache = new Map();
+
 const client = new Client({
     intents:  [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
 });
@@ -37,7 +41,12 @@ async function initDb() {
     const client = await pool.connect();
     try {
         await client.query(`CREATE TABLE IF NOT EXISTS transactions (ticket_id SERIAL PRIMARY KEY, channel_id VARCHAR(255), buyer_id VARCHAR(255), buyer_tag VARCHAR(255), product TEXT, amount BIGINT, detail TEXT, status VARCHAR(50) DEFAULT 'open', proof_image TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        await client.query(`CREATE TABLE IF NOT EXISTS testimonials (id SERIAL PRIMARY KEY, user_id VARCHAR(255), username VARCHAR(255), message TEXT, rating INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+        // Update tabel testimonials ada kolom image_url
+        await client.query(`CREATE TABLE IF NOT EXISTS testimonials (id SERIAL PRIMARY KEY, user_id VARCHAR(255), username VARCHAR(255), message TEXT, rating INT, image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+        
+        // Jaga-jaga jika tabel sudah ada tapi belum ada kolom image_url (Alter Table)
+        await client.query(`ALTER TABLE testimonials ADD COLUMN IF NOT EXISTS image_url TEXT;`);
+        
         console.log('✅ Database Ready');
     } catch (err) { console.error(err); } finally { client.release(); }
 }
@@ -137,7 +146,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply({ embeds: [embed], ephemeral: true });
         }
 
-        // --- 5. UPLOAD BUKTI ---
+        // --- 5. UPLOAD BUKTI BAYAR ---
         if (interaction.isButton() && interaction.customId === 'btn_confirm_paid') {
             const tData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
             if (tData.rows.length === 0 || tData.rows[0].buyer_id !== interaction.user.id) return interaction.reply({content: '❌ Error / Bukan pembeli.', ephemeral: true});
@@ -155,7 +164,6 @@ client.on('interactionCreate', async interaction => {
                 const waitEmbed = new EmbedBuilder().setTitle('✅ Bukti Diterima').setDescription('Mohon tunggu, Admin sedang memverifikasi pembayaran Anda.').setColor('Blue');
                 await interaction.channel.send({ embeds: [waitEmbed] });
 
-                // Kirim ke Log Admin
                 const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
                 if (logChannel) {
                     const adminEmbed = new EmbedBuilder().setTitle(`⚠️ Verifikasi #${tData.rows[0].ticket_id}`).setDescription(`Buyer: <@${m.author.id}>\nChannel: <#${ticketChId}>`).setImage(imgUrl).setColor('Orange');
@@ -179,7 +187,6 @@ client.on('interactionCreate', async interaction => {
 
             const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
             if (ticketChannel) {
-                // UPDATE: Tombol ini untuk Admin, memberi tahu bahwa barang sudah dikirim
                 const adminSentRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('admin_sent_product').setLabel('📦 Barang Sudah Dikirim').setStyle(ButtonStyle.Primary)
                 );
@@ -193,30 +200,51 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ content: `✅ Sukses verifikasi tiket #${data.ticket_id}`, ephemeral: true });
         }
 
-        // --- 7. ADMIN BARANG DIKIRIM & MINTA CONFIRM BUYER ---
+        // --- 7. ADMIN BARANG DIKIRIM ---
         if (interaction.isButton() && interaction.customId === 'admin_sent_product') {
             if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) return interaction.reply({content: '❌ Admin only', ephemeral: true});
 
-            // Kirim tombol konfirmasi KHUSUS BUYER
             const buyerConfirmRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId('buyer_confirm_receive').setLabel('✅ Pesanan Diterima & Selesai').setStyle(ButtonStyle.Success)
+                new ButtonBuilder().setCustomId('buyer_confirm_receive').setLabel('✅ Pesanan Diterima').setStyle(ButtonStyle.Success)
             );
 
             await interaction.reply({ 
-                content: `📦 **Produk Telah Dikirim!**\n\nSilakan cek pesanan Anda. Jika sudah sesuai, klik tombol di bawah untuk menyelesaikan transaksi dan memberikan testimoni.`,
+                content: `📦 **Produk Telah Dikirim!**\n\nSilakan cek pesanan Anda. Jika sudah sesuai, klik tombol di bawah untuk menyelesaikan transaksi.`,
                 components: [buyerConfirmRow] 
             });
         }
 
-        // --- 8. BUYER KONFIRMASI TERIMA (TRIGGER TESTIMONI) ---
+        // --- 8. BUYER KONFIRMASI TERIMA (MINTA GAMBAR) ---
         if (interaction.isButton() && interaction.customId === 'buyer_confirm_receive') {
-            // Cek apakah yang klik benar-benar Buyer
             const tData = await pool.query("SELECT * FROM transactions WHERE channel_id = $1", [interaction.channel.id]);
             if (tData.rows.length === 0 || tData.rows[0].buyer_id !== interaction.user.id) {
                 return interaction.reply({ content: '❌ Hanya Pembeli yang bisa mengkonfirmasi ini!', ephemeral: true });
             }
 
-            // Langsung buka Form Testimoni
+            // Minta Gambar Dulu (UX Trick)
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('open_testi_modal_final').setLabel('✍️ Tulis Ulasan (Form)').setStyle(ButtonStyle.Primary)
+            );
+
+            await interaction.reply({ 
+                content: `📸 **(Opsional) Sertakan Foto Produk**\nJika Anda ingin menampilkan foto produk di testimoni, silakan **KIRIM GAMBAR/FOTO di chat ini sekarang**.\n\nJika sudah kirim gambar (atau tidak ingin pakai gambar), klik tombol **Tulis Ulasan** di bawah.`, 
+                components: [row] 
+            });
+        }
+
+        // --- 9. BUKA FORM TESTIMONI (SCAN GAMBAR OTOMATIS) ---
+        if (interaction.isButton() && interaction.customId === 'open_testi_modal_final') {
+            // Scan 10 pesan terakhir untuk mencari gambar dari user ini
+            const messages = await interaction.channel.messages.fetch({ limit: 10 });
+            const lastImageMsg = messages.find(m => m.author.id === interaction.user.id && m.attachments.size > 0);
+            
+            // Simpan URL gambar ke cache sementara jika ketemu
+            if (lastImageMsg) {
+                tempImageCache.set(interaction.user.id, lastImageMsg.attachments.first().url);
+            } else {
+                tempImageCache.delete(interaction.user.id); // Bersihkan kalau gak ada
+            }
+
             const modal = new ModalBuilder().setCustomId('modal_testi').setTitle('Bagaimana Pelayanan Kami?');
             modal.addComponents(
                 new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('rating').setLabel('Rating (1-5)').setStyle(TextInputStyle.Short).setMaxLength(1).setRequired(true)),
@@ -225,33 +253,48 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
 
-        // --- 9. SUBMIT TESTIMONI & DELETE CHANNEL ---
+        // --- 10. SUBMIT TESTIMONI & DELETE ---
         if (interaction.isModalSubmit() && interaction.customId === 'modal_testi') {
+            await interaction.deferReply();
+
             let rating = parseInt(interaction.fields.getTextInputValue('rating')) || 5;
             if (rating < 1) rating = 1; if (rating > 5) rating = 5;
             const msg = interaction.fields.getTextInputValue('msg');
             
-            // Simpan Testimoni
-            await pool.query("INSERT INTO testimonials (user_id, username, message, rating) VALUES ($1, $2, $3, $4)", [interaction.user.id, interaction.user.username, msg, rating]);
-            
-            // Post ke Channel Testimoni
-            const testiChannel = client.channels.cache.get(process.env.TESTIMONI_CHANNEL_ID);
-            if (testiChannel) await testiChannel.send({ embeds: [new EmbedBuilder().setAuthor({ name: interaction.user.tag, iconURL: interaction.user.displayAvatarURL() }).setDescription(`**Rating:** ${'⭐'.repeat(rating)}\n"${msg}"`).setColor('Gold').setTimestamp()] });
+            // Ambil gambar dari cache (jika ada)
+            const imageUrl = tempImageCache.get(interaction.user.id) || null;
+            tempImageCache.delete(interaction.user.id); // Clear cache
+
+            // Simpan Testimoni ke DB
+            await pool.query("INSERT INTO testimonials (user_id, username, message, rating, image_url) VALUES ($1, $2, $3, $4, $5)", [interaction.user.id, interaction.user.username, msg, rating, imageUrl]);
             
             // Update Status Completed
             await pool.query("UPDATE transactions SET status = 'completed' WHERE channel_id = $1", [interaction.channel.id]);
+
+            // Post ke Channel Testimoni
+            const testiChannel = client.channels.cache.get(process.env.TESTIMONI_CHANNEL_ID);
+            if (testiChannel) {
+                const embed = new EmbedBuilder()
+                    .setAuthor({ name: interaction.user.tag, iconURL: interaction.user.displayAvatarURL() })
+                    .setDescription(`**Rating:** ${'⭐'.repeat(rating)}\n"${msg}"`)
+                    .setColor('Gold')
+                    .setTimestamp();
+                
+                if (imageUrl) embed.setImage(imageUrl); // Lampirkan gambar jika ada
+
+                await testiChannel.send({ embeds: [embed] });
+            }
 
             // Log Completed
             const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
             if (logChannel) logChannel.send(`✅ Ticket (Completed) - ${interaction.user.tag}`);
 
-            // Hapus Channel
-            await interaction.reply({ content: '✅ Terima kasih! Transaksi selesai. Channel akan dihapus dalam 5 detik...' });
+            await interaction.editReply({ content: '✅ Terima kasih! Transaksi selesai. Channel akan dihapus dalam 5 detik...' });
             setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
             updateStatus();
         }
 
-        // --- 10. ADMIN TOLAK (LOG) ---
+        // --- 11. ADMIN TOLAK (LOG) ---
         if (interaction.isButton() && interaction.customId.startsWith('admin_reject_')) {
             const targetChannelId = interaction.customId.split('_')[2];
             const ticketChannel = interaction.guild.channels.cache.get(targetChannelId);
