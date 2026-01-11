@@ -21,19 +21,20 @@ const pool = new Pool({
 });
 
 // Cache Sementara untuk menyimpan URL gambar sebelum Modal disubmit
-// Key: UserId, Value: ImageURL
 const tempImageCache = new Map();
 
 const client = new Client({
     intents:  [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers]
 });
 
-// ========== DATA PEMBAYARAN ==========
+// ========== DATA PEMBAYARAN LENGKAP ==========
 const paymentMethods = [
-    { name:  'Bank Jago', emoji: '🟣', number: '104004201095', holder: 'Adrianus Indraprasta Dwicaksana' },
+    { name: 'Bank Jago', emoji: '🟣', number: '104004201095', holder: 'Adrianus Indraprasta Dwicaksana' },
     { name: 'BCA', emoji: '🔵', number: '2802312092', holder: 'Adrianus Indraprasta Dwicaksana' },
-    { name:  'GoPay', emoji: '💚', number: '082320010090', holder: 'Adrianus Indraprasta Dwicaksana' },
-    { name:  'QRIS', emoji: '📱', number: 'ADR14NSTORE', holder: 'Scan QR Code' }
+    { name: 'BluBCA', emoji: '🔵', number: '002460031049', holder: 'Adrianus Indraprasta Dwicaksana' },
+    { name: 'GoPay', emoji: '💚', number: '082320010090', holder: 'Adrianus Indraprasta Dwicaksana' },
+    { name: 'OVO', emoji: '💜', number: '082320010090', holder: 'Adrianus Indraprasta Dwicaksana' },
+    { name: 'QRIS', emoji: '📱', number: 'ADR14NSTORE', holder: 'Scan QR Code' }
 ];
 
 // ========== INIT & STATUS ==========
@@ -41,12 +42,8 @@ async function initDb() {
     const client = await pool.connect();
     try {
         await client.query(`CREATE TABLE IF NOT EXISTS transactions (ticket_id SERIAL PRIMARY KEY, channel_id VARCHAR(255), buyer_id VARCHAR(255), buyer_tag VARCHAR(255), product TEXT, amount BIGINT, detail TEXT, status VARCHAR(50) DEFAULT 'open', proof_image TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        // Update tabel testimonials ada kolom image_url
         await client.query(`CREATE TABLE IF NOT EXISTS testimonials (id SERIAL PRIMARY KEY, user_id VARCHAR(255), username VARCHAR(255), message TEXT, rating INT, image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-        
-        // Jaga-jaga jika tabel sudah ada tapi belum ada kolom image_url (Alter Table)
         await client.query(`ALTER TABLE testimonials ADD COLUMN IF NOT EXISTS image_url TEXT;`);
-        
         console.log('✅ Database Ready');
     } catch (err) { console.error(err); } finally { client.release(); }
 }
@@ -70,20 +67,45 @@ client.once('ready', async () => {
 // ========== INTERACTION HANDLER ==========
 client.on('interactionCreate', async interaction => {
     try {
-        // --- 1. SETUP COMMAND ---
+        // --- 1. SETUP COMMAND (TAMPILAN BARU SESUAI GAMBAR) ---
         if (interaction.isChatInputCommand() && interaction.commandName === 'setup-ticket') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({content: '❌ Admin only', ephemeral: true});
             
             const embed = new EmbedBuilder()
-                .setTitle('🛒 ADR14N STORE - ORDER DISINI')
-                .setDescription('Klik tombol di bawah untuk memulai transaksi.\nMetode pembayaran: BCA, Jago, QRIS, E-Wallet.')
-                .setColor('Blue');
+                .setTitle('🎫 ADR14N STORE - Sistem Transaksi')
+                .setDescription(
+                    '**Selamat datang di ADR14N Store!**\n\n' +
+                    '📦 **Layanan Kami:**\n' +
+                    '• Jual Steam Key & Game Original\n' +
+                    '• Windows & Office License\n' +
+                    '• Jasa Digital Lainnya\n\n' +
+                    '✨ **Keunggulan:**\n' +
+                    '• Proses Cepat\n' +
+                    '• Harga Bersaing\n' +
+                    '• Garansi Produk\n\n' +
+                    '👇 **Klik tombol di bawah untuk membuat ticket!**'
+                )
+                .setColor('#5865F2') // Warna Blurple Discord (sesuai gambar)
+                .setFooter({ text: 'ADR14N Store • Trusted Seller' })
+                .setTimestamp();
             
+            // Menggunakan Icon Server sebagai Thumbnail (Pojok Kanan Atas)
+            if (interaction.guild.iconURL()) {
+                embed.setThumbnail(interaction.guild.iconURL({ dynamic: true }));
+            }
+
+            // (Opsional) Banner Bawah jika ada di env
             if (process.env.BANNER_URL) embed.setImage(process.env.BANNER_URL);
 
-            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('open_ticket').setLabel('📩 Buat Pesanan').setStyle(ButtonStyle.Primary));
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('open_ticket')
+                    .setLabel('📩 Buat Ticket') // Label disesuaikan
+                    .setStyle(ButtonStyle.Primary)
+            );
+
             await interaction.channel.send({ embeds: [embed], components: [row] });
-            interaction.reply({ content: 'Panel Done!', ephemeral: true });
+            interaction.reply({ content: '✅ Panel Setup Berhasil!', ephemeral: true });
         }
 
         // --- 2. OPEN MODAL ---
@@ -137,9 +159,9 @@ client.on('interactionCreate', async interaction => {
             updateStatus();
         }
 
-        // --- 4. INFO BAYAR ---
+        // --- 4. INFO BAYAR (LENGKAP) ---
         if (interaction.isButton() && interaction.customId === 'btn_pay_info') {
-            let desc = ''; paymentMethods.forEach(p => desc += `${p.emoji} **${p.name}**: \`${p.number}\` (${p.holder})\n`);
+            let desc = ''; paymentMethods.forEach(p => desc += `${p.emoji} **${p.name}**\n\`${p.number}\`\na.n ${p.holder}\n\n`);
             const embed = new EmbedBuilder().setTitle('Metode Pembayaran').setDescription(desc).setColor('Blue');
             const qrisUrl = process.env.QRIS_IMAGE_URL || process.env.QRIS_URL;
             if(qrisUrl) embed.setImage(qrisUrl);
@@ -221,7 +243,6 @@ client.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: '❌ Hanya Pembeli yang bisa mengkonfirmasi ini!', ephemeral: true });
             }
 
-            // Minta Gambar Dulu (UX Trick)
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('open_testi_modal_final').setLabel('✍️ Tulis Ulasan (Form)').setStyle(ButtonStyle.Primary)
             );
@@ -232,17 +253,15 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        // --- 9. BUKA FORM TESTIMONI (SCAN GAMBAR OTOMATIS) ---
+        // --- 9. BUKA FORM TESTIMONI ---
         if (interaction.isButton() && interaction.customId === 'open_testi_modal_final') {
-            // Scan 10 pesan terakhir untuk mencari gambar dari user ini
             const messages = await interaction.channel.messages.fetch({ limit: 10 });
             const lastImageMsg = messages.find(m => m.author.id === interaction.user.id && m.attachments.size > 0);
             
-            // Simpan URL gambar ke cache sementara jika ketemu
             if (lastImageMsg) {
                 tempImageCache.set(interaction.user.id, lastImageMsg.attachments.first().url);
             } else {
-                tempImageCache.delete(interaction.user.id); // Bersihkan kalau gak ada
+                tempImageCache.delete(interaction.user.id);
             }
 
             const modal = new ModalBuilder().setCustomId('modal_testi').setTitle('Bagaimana Pelayanan Kami?');
@@ -261,17 +280,12 @@ client.on('interactionCreate', async interaction => {
             if (rating < 1) rating = 1; if (rating > 5) rating = 5;
             const msg = interaction.fields.getTextInputValue('msg');
             
-            // Ambil gambar dari cache (jika ada)
             const imageUrl = tempImageCache.get(interaction.user.id) || null;
-            tempImageCache.delete(interaction.user.id); // Clear cache
+            tempImageCache.delete(interaction.user.id); 
 
-            // Simpan Testimoni ke DB
             await pool.query("INSERT INTO testimonials (user_id, username, message, rating, image_url) VALUES ($1, $2, $3, $4, $5)", [interaction.user.id, interaction.user.username, msg, rating, imageUrl]);
-            
-            // Update Status Completed
             await pool.query("UPDATE transactions SET status = 'completed' WHERE channel_id = $1", [interaction.channel.id]);
 
-            // Post ke Channel Testimoni
             const testiChannel = client.channels.cache.get(process.env.TESTIMONI_CHANNEL_ID);
             if (testiChannel) {
                 const embed = new EmbedBuilder()
@@ -279,13 +293,10 @@ client.on('interactionCreate', async interaction => {
                     .setDescription(`**Rating:** ${'⭐'.repeat(rating)}\n"${msg}"`)
                     .setColor('Gold')
                     .setTimestamp();
-                
-                if (imageUrl) embed.setImage(imageUrl); // Lampirkan gambar jika ada
-
+                if (imageUrl) embed.setImage(imageUrl); 
                 await testiChannel.send({ embeds: [embed] });
             }
 
-            // Log Completed
             const logChannel = interaction.guild.channels.cache.get(process.env.LOG_TRANSAKSI_ID);
             if (logChannel) logChannel.send(`✅ Ticket (Completed) - ${interaction.user.tag}`);
 
