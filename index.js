@@ -130,8 +130,23 @@ client.on('interactionCreate', async interaction => {
 
         // --- BUTTON: OPEN MODAL ---
         if (interaction.isButton() && interaction.customId === 'open_ticket') {
+            // Cek apakah ada tiket aktif di database
             const check = await pool.query("SELECT * FROM transactions WHERE buyer_id = $1 AND status != 'completed' AND status != 'cancelled'", [interaction.user.id]);
-            if (check.rows.length > 0) return interaction.reply({ content: `❌ Anda masih punya tiket aktif! <#${check.rows[0].channel_id}>`, ephemeral: true });
+            
+            if (check.rows.length > 0) {
+                const existingData = check.rows[0];
+                // Cek apakah channelnya masih ada di server Discord?
+                const channelExist = interaction.guild.channels.cache.get(existingData.channel_id);
+
+                if (channelExist) {
+                    // Jika channel masih ada, tolak buat baru
+                    return interaction.reply({ content: `❌ Anda masih punya tiket aktif! <#${existingData.channel_id}>`, ephemeral: true });
+                } else {
+                    // Jika channel SUDAH DIHAPUS manual, update DB jadi 'cancelled' otomatis
+                    await pool.query("UPDATE transactions SET status = 'cancelled' WHERE ticket_id = $1", [existingData.ticket_id]);
+                    // Lanjut biarkan user membuat tiket baru...
+                }
+            }
 
             const modal = new ModalBuilder().setCustomId('ticket_modal').setTitle('Form Pemesanan');
             modal.addComponents(
